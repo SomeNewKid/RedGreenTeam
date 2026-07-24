@@ -1,0 +1,41 @@
+schema_version = 1
+
+agents = [
+  "../frontend_agent/sandbox_spec.toml",
+  "../backend_agent/sandbox_spec.toml",
+  "../database_agent/sandbox_spec.toml",
+  "sandbox_spec.toml",
+]
+
+[execution]
+mode = "entry_agent"
+entry_agent = "agent_1"
+order = [
+  "frontend_agent",
+  "backend_agent",
+  "database_agent",
+  "agent_1",
+]
+
+[network]
+enabled = true
+internal = true
+subnet = "172.28.0.0/24"
+
+[squid_proxy]
+default_allowed_domains = []
+default_allowed_ip_addresses = []
+
+[haproxy]
+backend_host = "host.docker.internal"
+default_ports = []
+
+[mcp_sidecar]
+default_tools = []
+default_resources = []
+container_capabilities = [
+  "network",
+]
+application_capabilities = [
+  "openai_agents",
+]
