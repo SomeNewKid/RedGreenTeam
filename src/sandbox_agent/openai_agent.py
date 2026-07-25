@@ -1,4 +1,4 @@
-"""AI agent that classifies bug reports through specialist workers."""
+"""AI coordinator that starts the RedGreenTeam TDD workflow."""
 
 from __future__ import annotations
 
@@ -11,57 +11,74 @@ if TYPE_CHECKING:
 _OUTPUT_DIRECTORY = Path("/sandbox-output")
 _SITE_DIRECTORY = _OUTPUT_DIRECTORY / "site"
 _DEFAULT_MODEL = "gpt-4.1-mini"
+_SOFTWARE_REQUIREMENT = (
+    "Implement slugify_title(title: str) -> str so that article titles become "
+    "ASCII lowercase URL slugs separated by hyphens. For example, "
+    '"Beyoncé’s Music Won’t Age" should become "beyonces-music-wont-age".'
+)
 _AGENT_PROMPT = """
-Assess this fictional software bug report:
+Coordinate the RedGreenTeam test-driven development workflow.
 
-Users report that after submitting the billing settings form, the page shows a
-success toast, but refreshing the page restores the old billing address. The
-browser network tab shows a successful 200 response, and the audit log later
-shows two address records for the same account.
+Software requirement:
+Implement slugify_title(title: str) -> str so that article titles become ASCII
+lowercase URL slugs separated by hyphens. For example, "Beyoncé’s Music Won’t Age"
+should become "beyonces-music-wont-age".
 
-Call get_parallel_bug_assessments exactly once with the full bug report text.
-Treat the response as a JSON object containing frontend, backend, and database
-specialist assessments. Each assessment has an area, likelihood_percent, reasons,
-and task_id.
+Call run_red_green_loop exactly once with this requirement and max_iterations=10.
 
-Decide the final likely category and priority. Choose one category from:
-frontend, backend, database, mixed, or unclear. Choose one priority from:
-P0, P1, P2, P3, or P4.
+The loop asks coder_agent to create the initial stub in /sandbox-shared/solution.py,
+asks tester_agent to create /sandbox-shared/tests.py once, asks coder_agent for an
+initial implementation, then repeatedly asks tester_agent to run the existing tests
+and asks coder_agent to update only /sandbox-shared/solution.py when tests fail.
+When tests pass, save answer.txt with the final successful solution and tests.
 
-Save the final answer with the save_answer tool. Include the submitted bug
-report, each worker's likelihood percentage with short reasons, the final
-category, the final priority, and a concise justification. Do not finish until
-both tool calls have succeeded.
+After run_red_green_loop succeeds, summarize whether the final test assessment
+passed, how many attempts were made, and where the final solution was written.
+Do not call any other tool unless run_red_green_loop fails and you need to
+inspect shared files.
 """
 
 
 def create_openai_agent(model: str = _DEFAULT_MODEL) -> Agent:
-    """Create the Sandbox Agent bug report manager."""
+    """Create the RedGreenTeam coordinator agent."""
     from agents import Agent
 
     from .openai_tools import (
-        get_parallel_bug_assessments_tool,
+        create_solution_skeleton_tool,
+        get_test_assessment_tool,
+        read_shared_file_tool,
+        request_code_update_tool,
+        request_solution_stub_tool,
+        request_test_creation_tool,
+        run_red_green_loop_tool,
         save_answer_tool,
+        save_shared_file_tool,
     )
 
     return Agent(
-        name="Bug Report Manager",
+        name="RedGreenTeam Coordinator",
         model=model,
         instructions=(
-            "You are a careful bug report triage manager. Use the provided "
-            "parallel assessment tool exactly once, synthesize the specialist "
-            "opinions, and save the final classification. Do not finish until "
-            "both tool calls have succeeded."
+            "You are the RedGreenTeam coordinator. Start with the supplied "
+            "software requirement, run the tester/coder red-green loop, and "
+            "ensure answer.txt is saved with the final result."
         ),
         tools=[
-            get_parallel_bug_assessments_tool,
+            create_solution_skeleton_tool,
+            get_test_assessment_tool,
+            read_shared_file_tool,
+            request_code_update_tool,
+            request_solution_stub_tool,
+            request_test_creation_tool,
+            run_red_green_loop_tool,
             save_answer_tool,
+            save_shared_file_tool,
         ],
     )
 
 
-def run_html_element_agent(model: str = _DEFAULT_MODEL) -> str:
-    """Run the HTML element agent and save its final response."""
+def run_red_green_coordinator(model: str = _DEFAULT_MODEL) -> str:
+    """Run the RedGreenTeam coordinator agent and return its final response."""
     from agents import Runner
 
     _SITE_DIRECTORY.mkdir(parents=True, exist_ok=True)

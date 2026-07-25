@@ -16,6 +16,7 @@ from docker_sandbox.sandbox_plan import (
     McpSidecarSpec,
     NetworkSpec,
     ResolvedAgentPlan,
+    ResolvedCodeSidecarPlan,
     ResolvedHAProxyPlan,
     ResolvedMcpSidecarPlan,
     ResolvedSandboxPlan,
@@ -174,6 +175,7 @@ def test_resolved_sandbox_plan_serializes_to_json_safe_data() -> None:
         squid_proxy=ResolvedSquidPlan(enabled=True),
         haproxy=ResolvedHAProxyPlan(enabled=True),
         mcp_sidecar=ResolvedMcpSidecarPlan(enabled=True),
+        code_sidecar=ResolvedCodeSidecarPlan(enabled=True, ip_address="172.28.0.4"),
         execution=ExecutionSpec(mode="sequential", order=("agent_1",)),
     )
 
@@ -240,49 +242,42 @@ def test_load_sandbox_run_spec_reads_run_level_defaults(tmp_path: Path) -> None:
 
 
 def test_default_sandbox_run_spec_starts_support_agents_before_entry_agent() -> None:
-    """Verify the default run includes specialist bug assessment services."""
+    """Verify the default run starts RedGreenTeam agents before the coordinator."""
     spec_path = Path("src") / "sandbox_agent" / "sandbox_run.toml"
     repository_root = Path.cwd()
 
     spec = load_sandbox_run_spec(spec_path)
 
     assert spec.agent_spec_paths == (
-        repository_root / "src" / "frontend_agent" / "sandbox_spec.toml",
-        repository_root / "src" / "backend_agent" / "sandbox_spec.toml",
-        repository_root / "src" / "database_agent" / "sandbox_spec.toml",
+        repository_root / "src" / "tester_agent" / "sandbox_spec.toml",
+        repository_root / "src" / "coder_agent" / "sandbox_spec.toml",
         repository_root / "src" / "sandbox_agent" / "sandbox_spec.toml",
     )
     assert spec.execution.entry_agent == "agent_1"
     assert spec.execution.order == (
-        "frontend_agent",
-        "backend_agent",
-        "database_agent",
+        "tester_agent",
+        "coder_agent",
         "agent_1",
     )
 
 
-def test_default_bug_agents_use_a2a_without_shared_volume() -> None:
-    """Verify default bug agents use A2A tasks without shared storage."""
-    frontend_spec = load_agent_spec(
-        Path("src") / "frontend_agent" / "sandbox_spec.toml"
-    )
-    backend_spec = load_agent_spec(Path("src") / "backend_agent" / "sandbox_spec.toml")
-    database_spec = load_agent_spec(
-        Path("src") / "database_agent" / "sandbox_spec.toml"
-    )
+def test_default_red_green_agents_use_a2a_with_shared_volume() -> None:
+    """Verify default RedGreenTeam agents use A2A and shared solution storage."""
+    tester_spec = load_agent_spec(Path("src") / "tester_agent" / "sandbox_spec.toml")
+    coder_spec = load_agent_spec(Path("src") / "coder_agent" / "sandbox_spec.toml")
     sandbox_spec = load_agent_spec(Path("src") / "sandbox_agent" / "sandbox_spec.toml")
 
-    assert "a2a" in frontend_spec.application_capabilities
-    assert "openai_agents" in frontend_spec.application_capabilities
-    assert "a2a" in backend_spec.application_capabilities
-    assert "openai_agents" in backend_spec.application_capabilities
-    assert "a2a" in database_spec.application_capabilities
-    assert "openai_agents" in database_spec.application_capabilities
+    assert "a2a" in tester_spec.application_capabilities
+    assert "code_execution" in tester_spec.application_capabilities
+    assert "mcp_client" in tester_spec.application_capabilities
+    assert "openai_agents" in tester_spec.application_capabilities
+    assert tester_spec.mcp_sidecar.tools == ("run_python_script",)
+    assert "a2a" in coder_spec.application_capabilities
+    assert "openai_agents" in coder_spec.application_capabilities
     assert "a2a" in sandbox_spec.application_capabilities
-    assert "shared_volume" not in frontend_spec.container_capabilities
-    assert "shared_volume" not in backend_spec.container_capabilities
-    assert "shared_volume" not in database_spec.container_capabilities
-    assert "shared_volume" not in sandbox_spec.container_capabilities
+    assert "shared_volume" in tester_spec.container_capabilities
+    assert "shared_volume" in coder_spec.container_capabilities
+    assert "shared_volume" in sandbox_spec.container_capabilities
 
 
 def test_load_sandbox_run_spec_rejects_unknown_top_level_keys(
@@ -706,7 +701,7 @@ def test_build_sandbox_plan_resolves_shared_sidecars_and_agents() -> None:
         agent_id="agent_1",
         module="sandbox_agent",
         container_capabilities=("network",),
-        application_capabilities=("mcp_client", "openai_agents"),
+        application_capabilities=("mcp_client", "openai_agents", "code_execution"),
         environment_variables=(("APP_MODE", "writer"),),
         squid_proxy=AgentSquidProxySpec(allowed_domains=(".example.com",)),
         haproxy=AgentHAProxySpec(ports=(3307,)),
@@ -729,10 +724,12 @@ def test_build_sandbox_plan_resolves_shared_sidecars_and_agents() -> None:
     assert plan.squid_proxy.container_name == "squid-proxy-run-2026-07-23"
     assert plan.squid_proxy.ip_address == "172.28.0.2"
     assert plan.haproxy.enabled
-    assert plan.haproxy.ip_address == "172.28.0.4"
+    assert plan.haproxy.ip_address == "172.28.0.5"
     assert plan.haproxy.default_ports == (3306,)
     assert plan.mcp_sidecar.enabled
     assert plan.mcp_sidecar.ip_address == "172.28.0.3"
+    assert plan.code_sidecar.enabled
+    assert plan.code_sidecar.ip_address == "172.28.0.4"
     assert plan.mcp_sidecar.tools == (
         "get_html_element_name",
         "microsoft_docs_search",
@@ -911,6 +908,7 @@ def test_save_resolved_sandbox_plan_writes_run_artifact(tmp_path: Path) -> None:
         squid_proxy=ResolvedSquidPlan(enabled=False),
         haproxy=ResolvedHAProxyPlan(enabled=False),
         mcp_sidecar=ResolvedMcpSidecarPlan(enabled=False),
+        code_sidecar=ResolvedCodeSidecarPlan(enabled=False),
     )
 
     plan_path = save_resolved_sandbox_plan(plan, tmp_path)

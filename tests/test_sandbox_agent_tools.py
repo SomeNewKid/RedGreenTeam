@@ -4,24 +4,30 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any
 
 import pytest
 
 from sandbox_agent.tools import (
+    create_solution_skeleton,
     generate_image,
     generate_image_artifact,
     get_active_items,
     get_answer_format,
     get_html_element_name,
-    get_parallel_bug_assessments,
+    get_test_assessment,
     jina_read_url,
     microsoft_code_sample_search,
     microsoft_docs_fetch,
     microsoft_docs_search,
+    read_shared_file,
+    request_code_update,
+    request_solution_stub,
+    request_test_creation,
     run_python_script,
+    run_red_green_loop,
     save_answer,
     save_image,
+    save_shared_file,
     save_shared_image_artifact,
     validate_html5_element,
 )
@@ -285,66 +291,353 @@ def test_generate_image_artifact_rejects_invalid_mcp_result(
     assert not (site_path / "illustration.png").exists()
 
 
-def test_get_parallel_bug_assessments_starts_specialist_tasks(monkeypatch) -> None:
-    """Verify bug assessment uses the parallel A2A helper for all specialists."""
+def test_create_solution_skeleton_writes_shared_solution_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Verify the coordinator creates the initial shared solution.py skeleton."""
+    shared_path = tmp_path / "shared"
+    monkeypatch.setenv("SANDBOX_SHARED_DIR", str(shared_path))
+
+    result = create_solution_skeleton("Implement slugify_title(title: str) -> str.")
+
+    solution_path = shared_path / "solution.py"
+    assert result == {
+        "success": True,
+        "message": "Created solution.py",
+    }
+    assert solution_path.exists()
+    solution_text = solution_path.read_text(encoding="utf-8")
+    assert "Implement slugify_title(title: str) -> str." in solution_text
+    assert "def slugify_title(title: str) -> str:" in solution_text
+    assert "raise NotImplementedError" in solution_text
+
+
+def test_save_and_read_shared_file_round_trips_text(tmp_path, monkeypatch) -> None:
+    """Verify shared text artifacts are saved under the shared directory."""
+    shared_path = tmp_path / "shared"
+    monkeypatch.setenv("SANDBOX_SHARED_DIR", str(shared_path))
+
+    result = save_shared_file("tests.py", "assert True\n")
+
+    assert result == {
+        "success": True,
+        "message": "Created tests.py",
+    }
+    assert read_shared_file("tests.py") == "assert True\n"
+
+
+def test_save_shared_file_rejects_parent_escape(tmp_path, monkeypatch) -> None:
+    """Verify shared text artifacts cannot be saved outside the shared directory."""
+    shared_path = tmp_path / "shared"
+    monkeypatch.setenv("SANDBOX_SHARED_DIR", str(shared_path))
+
+    result = save_shared_file("../solution.py", "bad = True\n")
+
+    assert result == {
+        "success": False,
+        "message": "Failed to save `../solution.py",
+    }
+    assert not (tmp_path / "solution.py").exists()
+
+
+def test_get_test_assessment_calls_tester_agent(monkeypatch) -> None:
+    """Verify test assessment uses the tester_agent run-tests action."""
     calls = []
 
     def fake_read_card(base_url: str) -> dict[str, object]:
         calls.append(("card", base_url))
         return {"url": f"{base_url}/a2a"}
 
-    def fake_send_tasks(
-        requests: tuple[Any, ...],
-        **kwargs: object,
-    ) -> tuple[object, ...]:
-        calls.append(("tasks", requests, kwargs))
-        return tuple(
-            _FakeTextTaskArtifactResult(
-                name=request.name,
-                task_id=f"{request.name}-task",
-                text=json.dumps(
-                    {
-                        "area": request.name,
-                        "likelihood_percent": 70,
-                        "reasons": ["Relevant symptom.", "Evidence is plausible."],
-                    }
-                ),
-            )
-            for request in requests
-        )
+    def fake_send_task(endpoint_url: str, text: str, **kwargs: object) -> str:
+        calls.append(("task", endpoint_url, text, kwargs))
+        return '{"agent": "tester_agent", "passed": false}'
 
-    monkeypatch.setenv("FRONTEND_AGENT_URL", "http://frontend-agent:8080")
-    monkeypatch.setenv("BACKEND_AGENT_URL", "http://backend-agent:8080")
-    monkeypatch.setenv("DATABASE_AGENT_URL", "http://database-agent:8080")
+    monkeypatch.setenv("TESTER_AGENT_URL", "http://tester-agent:8080")
     monkeypatch.setattr("sandbox_agent.tools.read_agent_card", fake_read_card)
     monkeypatch.setattr(
-        "sandbox_agent.tools.send_text_tasks_and_wait_for_text_artifacts",
-        fake_send_tasks,
+        "sandbox_agent.tools.send_text_task_and_wait_for_text_artifact",
+        fake_send_task,
     )
 
-    result = get_parallel_bug_assessments("Profile updates disappear after refresh.")
+    result = get_test_assessment("Implement slugify_title(title: str) -> str.")
 
-    data = json.loads(result)
-    assert data["bug_report"] == "Profile updates disappear after refresh."
-    assert data["assessments"]["frontend"]["task_id"] == "frontend-task"
-    assert data["assessments"]["backend"]["likelihood_percent"] == 70
-    assert data["assessments"]["database"]["reasons"] == [
-        "Relevant symptom.",
-        "Evidence is plausible.",
+    assert result == '{"agent": "tester_agent", "passed": false}'
+    assert calls == [
+        ("card", "http://tester-agent:8080"),
+        (
+            "task",
+            "http://tester-agent:8080/a2a",
+            (
+                '{"action": "run_tests", "requirement": '
+                '"Implement slugify_title(title: str) -> str."}'
+            ),
+            {
+                "request_id": "tester-agent-task-request",
+                "timeout_seconds": 300,
+                "poll_interval_seconds": 1.0,
+            },
+        ),
     ]
-    task_call = calls[3]
-    assert task_call[0] == "tasks"
-    requests = task_call[1]
-    assert [request.name for request in requests] == [
-        "frontend",
-        "backend",
-        "database",
+
+
+def test_request_code_update_calls_coder_agent(monkeypatch) -> None:
+    """Verify code updates use the coder_agent update action."""
+    calls = []
+
+    def fake_read_card(base_url: str) -> dict[str, object]:
+        calls.append(("card", base_url))
+        return {"url": f"{base_url}/a2a"}
+
+    def fake_send_task(endpoint_url: str, text: str, **kwargs: object) -> str:
+        calls.append(("task", endpoint_url, text, kwargs))
+        return '{"agent": "coder_agent", "updated": true}'
+
+    monkeypatch.setenv("CODER_AGENT_URL", "http://coder-agent:8080")
+    monkeypatch.setattr("sandbox_agent.tools.read_agent_card", fake_read_card)
+    monkeypatch.setattr(
+        "sandbox_agent.tools.send_text_task_and_wait_for_text_artifact",
+        fake_send_task,
+    )
+
+    result = request_code_update("Implement slugify_title(title: str) -> str.")
+
+    assert result == '{"agent": "coder_agent", "updated": true}'
+    assert calls == [
+        ("card", "http://coder-agent:8080"),
+        (
+            "task",
+            "http://coder-agent:8080/a2a",
+            (
+                '{"action": "update_solution", "requirement": '
+                '"Implement slugify_title(title: str) -> str."}'
+            ),
+            {
+                "request_id": "coder-agent-task-request",
+                "timeout_seconds": 300,
+                "poll_interval_seconds": 1.0,
+            },
+        ),
     ]
-    assert [request.endpoint_url for request in requests] == [
-        "http://frontend-agent:8080/a2a",
-        "http://backend-agent:8080/a2a",
-        "http://database-agent:8080/a2a",
+
+
+def test_request_solution_stub_calls_coder_agent(monkeypatch) -> None:
+    """Verify stub creation uses the coder_agent create-stub action."""
+    calls = []
+
+    def fake_read_card(base_url: str) -> dict[str, object]:
+        calls.append(("card", base_url))
+        return {"url": f"{base_url}/a2a"}
+
+    def fake_send_task(endpoint_url: str, text: str, **kwargs: object) -> str:
+        calls.append(("task", endpoint_url, text, kwargs))
+        return '{"agent": "coder_agent", "status": "stub_created"}'
+
+    monkeypatch.setenv("CODER_AGENT_URL", "http://coder-agent:8080")
+    monkeypatch.setattr("sandbox_agent.tools.read_agent_card", fake_read_card)
+    monkeypatch.setattr(
+        "sandbox_agent.tools.send_text_task_and_wait_for_text_artifact",
+        fake_send_task,
+    )
+
+    result = request_solution_stub("Implement slugify_title(title: str) -> str.")
+
+    assert result == '{"agent": "coder_agent", "status": "stub_created"}'
+    assert calls == [
+        ("card", "http://coder-agent:8080"),
+        (
+            "task",
+            "http://coder-agent:8080/a2a",
+            (
+                '{"action": "create_stub", "requirement": '
+                '"Implement slugify_title(title: str) -> str."}'
+            ),
+            {
+                "request_id": "coder-agent-stub-request",
+                "timeout_seconds": 300,
+                "poll_interval_seconds": 1.0,
+            },
+        ),
     ]
+
+
+def test_request_test_creation_calls_tester_agent(monkeypatch) -> None:
+    """Verify test creation uses the tester_agent create-tests action."""
+    calls = []
+
+    def fake_read_card(base_url: str) -> dict[str, object]:
+        calls.append(("card", base_url))
+        return {"url": f"{base_url}/a2a"}
+
+    def fake_send_task(endpoint_url: str, text: str, **kwargs: object) -> str:
+        calls.append(("task", endpoint_url, text, kwargs))
+        return '{"agent": "tester_agent", "status": "created"}'
+
+    monkeypatch.setenv("TESTER_AGENT_URL", "http://tester-agent:8080")
+    monkeypatch.setattr("sandbox_agent.tools.read_agent_card", fake_read_card)
+    monkeypatch.setattr(
+        "sandbox_agent.tools.send_text_task_and_wait_for_text_artifact",
+        fake_send_task,
+    )
+
+    result = request_test_creation("Implement slugify_title(title: str) -> str.")
+
+    assert result == '{"agent": "tester_agent", "status": "created"}'
+    assert calls == [
+        ("card", "http://tester-agent:8080"),
+        (
+            "task",
+            "http://tester-agent:8080/a2a",
+            (
+                '{"action": "create_tests", "requirement": '
+                '"Implement slugify_title(title: str) -> str."}'
+            ),
+            {
+                "request_id": "tester-agent-create-tests-request",
+                "timeout_seconds": 300,
+                "poll_interval_seconds": 1.0,
+            },
+        ),
+    ]
+
+
+def test_run_red_green_loop_saves_final_answer(tmp_path, monkeypatch) -> None:
+    """Verify the coordinator drives stub, tests, code, then red-green loops."""
+    shared_path = tmp_path / "shared"
+    answer_path = tmp_path / "answer.txt"
+    test_results = [
+        {"agent": "tester_agent", "status": "failed", "passed": False},
+        {"agent": "tester_agent", "status": "passed", "passed": True},
+    ]
+    code_updates = []
+    stub_requests = []
+    test_creation_requests = []
+
+    def fake_request_solution_stub(requirement: str) -> str:
+        stub_requests.append(requirement)
+        save_shared_file(
+            "solution.py",
+            "\n".join(
+                [
+                    '"""Solution."""',
+                    "",
+                    "",
+                    "def slugify_title(title: str) -> str:",
+                    "    raise NotImplementedError('not yet')",
+                    "",
+                ]
+            ),
+        )
+        return json.dumps(
+            {
+                "agent": "coder_agent",
+                "status": "stub_created",
+                "updated": True,
+            }
+        )
+
+    def fake_request_test_creation(requirement: str) -> str:
+        test_creation_requests.append(requirement)
+        save_shared_file(
+            "tests.py",
+            (
+                "def run_tests() -> dict[str, object]:\n"
+                "    return {\n"
+                "        'passed': False,\n"
+                "        'case_count': 1,\n"
+                "        'failures': [{'title': 'Hello World'}],\n"
+                "    }\n"
+            ),
+        )
+        return json.dumps(
+            {
+                "agent": "tester_agent",
+                "status": "created",
+                "created": True,
+            }
+        )
+
+    def fake_get_test_assessment(requirement: str) -> str:
+        _ = requirement
+        return json.dumps(test_results.pop(0))
+
+    def fake_request_code_update(requirement: str) -> str:
+        code_updates.append(requirement)
+        save_shared_file(
+            "solution.py",
+            "\n".join(
+                [
+                    '"""Solution."""',
+                    "",
+                    "",
+                    "def slugify_title(title: str) -> str:",
+                    "    return 'hello-world'",
+                    "",
+                ]
+            ),
+        )
+        return json.dumps(
+            {
+                "agent": "coder_agent",
+                "status": "updated",
+                "updated": True,
+            }
+        )
+
+    monkeypatch.setenv("SANDBOX_SHARED_DIR", str(shared_path))
+    monkeypatch.setattr("sandbox_agent.tools._ANSWER_FILE_PATH", answer_path)
+    monkeypatch.setattr(
+        "sandbox_agent.tools.request_solution_stub",
+        fake_request_solution_stub,
+    )
+    monkeypatch.setattr(
+        "sandbox_agent.tools.request_test_creation",
+        fake_request_test_creation,
+    )
+    monkeypatch.setattr(
+        "sandbox_agent.tools.get_test_assessment",
+        fake_get_test_assessment,
+    )
+    monkeypatch.setattr(
+        "sandbox_agent.tools.request_code_update",
+        fake_request_code_update,
+    )
+
+    result = run_red_green_loop(
+        "Implement slugify_title(title: str) -> str.",
+        max_iterations=3,
+    )
+
+    assert result["passed"] is True
+    assert stub_requests == ["Implement slugify_title(title: str) -> str."]
+    assert test_creation_requests == ["Implement slugify_title(title: str) -> str."]
+    assert code_updates == [
+        "Implement slugify_title(title: str) -> str.",
+        "Implement slugify_title(title: str) -> str.",
+    ]
+    attempts = result["attempts"]
+    assert isinstance(attempts, list)
+    assert len(attempts) == 2
+    stub_creation = result["stub_creation"]
+    tests_creation = result["tests_creation"]
+    initial_code_update = result["initial_code_update"]
+    assert isinstance(stub_creation, dict)
+    assert isinstance(tests_creation, dict)
+    assert isinstance(initial_code_update, dict)
+    assert stub_creation["status"] == "stub_created"
+    assert tests_creation["status"] == "created"
+    assert initial_code_update["status"] == "updated"
+    assert attempts[0]["code_update"] == {
+        "agent": "coder_agent",
+        "status": "updated",
+        "updated": True,
+    }
+    assert attempts[1]["code_update"] is None
+    answer_text = answer_path.read_text(encoding="utf-8")
+    assert "RedGreenTeam TDD Result" in answer_text
+    assert "Passed: True" in answer_text
+    assert "return 'hello-world'" in answer_text
+    assert "Final tests.py" in answer_text
 
 
 def test_get_answer_format_reads_mcp_sidecar_resource(monkeypatch) -> None:
@@ -400,7 +693,7 @@ def test_save_shared_image_artifact_copies_shared_file(tmp_path, monkeypatch) ->
     """Verify shared image artifacts can be copied into the web root."""
     site_path = tmp_path / "site"
     shared_path = tmp_path / "shared"
-    source_path = shared_path / "frontend_agent" / "illustration.png"
+    source_path = shared_path / "tester_agent" / "illustration.png"
     source_path.parent.mkdir(parents=True)
     source_path.write_bytes(b"fake png bytes")
     monkeypatch.setenv("SANDBOX_SHARED_DIR", str(shared_path))
@@ -408,7 +701,7 @@ def test_save_shared_image_artifact_copies_shared_file(tmp_path, monkeypatch) ->
 
     result = save_shared_image_artifact(
         "illustration.png",
-        "frontend_agent/illustration.png",
+        "tester_agent/illustration.png",
     )
 
     assert result == {
@@ -466,10 +759,3 @@ def test_save_image_rejects_parent_directory_escape(tmp_path, monkeypatch) -> No
         "message": "Failed to create `../illustration.png",
     }
     assert not (tmp_path / "illustration.png").exists()
-
-
-class _FakeTextTaskArtifactResult:
-    def __init__(self, name: str, task_id: str, text: str) -> None:
-        self.name = name
-        self.task_id = task_id
-        self.text = text

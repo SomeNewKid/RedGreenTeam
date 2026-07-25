@@ -4,6 +4,7 @@ module = "sandbox_agent"
 
 container_capabilities = [
   "network",
+  "shared_volume",
 ]
 
 application_capabilities = [

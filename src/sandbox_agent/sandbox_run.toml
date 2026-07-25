@@ -1,9 +1,8 @@
 schema_version = 1
 
 agents = [
-  "../frontend_agent/sandbox_spec.toml",
-  "../backend_agent/sandbox_spec.toml",
-  "../database_agent/sandbox_spec.toml",
+  "../tester_agent/sandbox_spec.toml",
+  "../coder_agent/sandbox_spec.toml",
   "sandbox_spec.toml",
 ]
 
@@ -11,9 +10,8 @@ agents = [
 mode = "entry_agent"
 entry_agent = "agent_1"
 order = [
-  "frontend_agent",
-  "backend_agent",
-  "database_agent",
+  "tester_agent",
+  "coder_agent",
   "agent_1",
 ]
 

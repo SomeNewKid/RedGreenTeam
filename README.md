@@ -1,27 +1,27 @@
-# BugReportTeam
+# RedGreenTeam
 
-BugReportTeam is a Python command-line project for running a small bug-report
-assessment workflow inside hardened, disposable Docker containers on a shared
-Docker network.
+RedGreenTeam is a Python command-line project for experimenting with a small
+multi-agent, test-driven development workflow inside hardened, disposable Docker
+containers on a shared Docker network.
 
-The default workload runs four agents:
+The default workload runs three agents:
 
-- `frontend_agent`: a supporting A2A task agent. It assesses whether a bug
-  report is likely related to web frontend or user-interface behavior.
-- `backend_agent`: a supporting A2A task agent. It assesses whether a bug report
-  is likely related to web server backend behavior.
-- `database_agent`: a supporting A2A task agent. It assesses whether a bug
-  report is likely related to database or data-layer behavior.
-- `sandbox_agent`: the manager and entry agent. It broadcasts one bug report to
-  all three specialists in parallel, collates their independent diagnoses, and
-  writes the final classification to `answer.txt`.
+- `sandbox_agent`: the entry coordinator. It asks the coder for the initial
+  not-implemented `solution.py`, orchestrates the red-green loop, and writes the
+  final `answer.txt`.
+- `tester_agent`: the critic/tester. It uses an LLM to create tests for the
+  shared `solution.py`, runs those tests through the code-execution sidecar, and
+  writes `test-results.json`.
+- `coder_agent`: the implementer. It reads the requirement, current solution,
+  tests, and test results, then updates only the shared `solution.py` file.
 
-Shared sidecars provide network and tool infrastructure:
+The current demonstration requirement is:
 
-- Squid proxy for controlled outbound network access.
-- Optional MCP server sidecar for declared tools and resources.
-- Optional HAProxy, code execution, Jina Reader, and Ollama sidecars for other
-  sandbox capabilities.
+```text
+Implement slugify_title(title: str) -> str so that article titles become ASCII
+lowercase URL slugs separated by hyphens. For example, "Beyoncé’s Music Won’t
+Age" should become "beyonces-music-wont-age".
+```
 
 > [!WARNING]
 > This is an experimental sandboxing and sidecar orchestration project. It is a
@@ -37,18 +37,26 @@ On each default run:
 3. It builds or reuses one Docker image per unique functional agent image
    requirement.
 4. It creates a per-run internal Docker network with deterministic IPs.
-5. It starts required shared sidecars.
-6. It starts `frontend_agent`, `backend_agent`, and `database_agent` as
-   supporting A2A HTTP task services.
+5. It starts required shared sidecars, including the MCP sidecar and
+   code-execution sidecar when required by the tester.
+6. It starts `tester_agent` and `coder_agent` as supporting A2A HTTP task
+   services.
 7. It runs `sandbox_agent` as the foreground entry agent.
-8. `sandbox_agent` calls one local tool that starts all three worker A2A tasks
-   before polling any of them.
-9. Each worker asks GPT-4.1 mini for a likelihood percentage and short reasons,
-   returns that assessment as an A2A task artifact, and writes a formatted
-   `assessment.json` file in its mounted output directory.
-10. `sandbox_agent` synthesizes the specialist assessments into a final category
-    and priority, then writes `/sandbox-output/answer.txt`.
-11. When the entry agent exits, the Docker network and containers are torn down.
+8. `sandbox_agent` asks `coder_agent` to create a not-implemented
+   `/sandbox-shared/solution.py` stub for the requirement.
+9. `sandbox_agent` asks `tester_agent` to create `/sandbox-shared/tests.py`
+   once for that stub and requirement.
+10. `sandbox_agent` asks `coder_agent` for its first implementation of
+    `/sandbox-shared/solution.py`.
+11. `sandbox_agent` asks `tester_agent` to run the existing tests and report
+    failed tests in `/sandbox-shared/test-results.json`.
+12. If tests fail, `sandbox_agent` asks `coder_agent` to address those failures
+    by editing only `/sandbox-shared/solution.py`.
+13. The loop repeats until the tests pass or the coordinator reaches the maximum
+    iteration count, currently 10.
+14. `sandbox_agent` writes `/sandbox-output/answer.txt` with the requirement,
+    attempt summary, final test result, final `solution.py`, and final tests.
+15. When the entry agent exits, Docker resources are torn down.
 
 ## Run
 
@@ -59,7 +67,7 @@ From the repository root:
 ```
 
 The host-side command delegates to `docker_sandbox`. Inside the container, the
-same module runs the actual `sandbox_agent` workload.
+same module runs the actual coordinator workload.
 
 Run artifacts are written under:
 
@@ -67,12 +75,18 @@ Run artifacts are written under:
 .docker_sandbox/runs/run-YYYY-mm-dd-HH-MM-SS/
 ```
 
-Expected worker evidence includes:
+Expected shared artifacts include:
 
 ```text
-.docker_sandbox/runs/run-YYYY-mm-dd-HH-MM-SS/agents/frontend_agent/assessment.json
-.docker_sandbox/runs/run-YYYY-mm-dd-HH-MM-SS/agents/backend_agent/assessment.json
-.docker_sandbox/runs/run-YYYY-mm-dd-HH-MM-SS/agents/database_agent/assessment.json
+.docker_sandbox/runs/run-YYYY-mm-dd-HH-MM-SS/shared/solution.py
+.docker_sandbox/runs/run-YYYY-mm-dd-HH-MM-SS/shared/tests.py
+.docker_sandbox/runs/run-YYYY-mm-dd-HH-MM-SS/shared/test-results.json
+```
+
+The final answer is written under the entry agent output directory:
+
+```text
+.docker_sandbox/runs/run-YYYY-mm-dd-HH-MM-SS/agents/agent_1/answer.txt
 ```
 
 ## Run-Level Spec
@@ -83,9 +97,8 @@ The run is declared by `src/sandbox_agent/sandbox_run.toml`:
 schema_version = 1
 
 agents = [
-  "../frontend_agent/sandbox_spec.toml",
-  "../backend_agent/sandbox_spec.toml",
-  "../database_agent/sandbox_spec.toml",
+  "../tester_agent/sandbox_spec.toml",
+  "../coder_agent/sandbox_spec.toml",
   "sandbox_spec.toml",
 ]
 
@@ -93,9 +106,8 @@ agents = [
 mode = "entry_agent"
 entry_agent = "agent_1"
 order = [
-  "frontend_agent",
-  "backend_agent",
-  "database_agent",
+  "tester_agent",
+  "coder_agent",
   "agent_1",
 ]
 
@@ -103,115 +115,51 @@ order = [
 enabled = true
 internal = true
 subnet = "172.28.0.0/24"
-
-[squid_proxy]
-default_allowed_domains = []
-default_allowed_ip_addresses = []
-
-[haproxy]
-backend_host = "host.docker.internal"
-default_ports = []
-
-[mcp_sidecar]
-default_tools = []
-default_resources = []
-container_capabilities = [
-  "network",
-]
-application_capabilities = [
-  "openai_agents",
-]
 ```
 
-## Agent Specs
+## Shared Artifact Contract
 
-Each worker declares `network`, `a2a`, and `openai_agents` capabilities. For
-example, `src/frontend_agent/sandbox_spec.toml` declares:
+The agents coordinate through one mounted shared directory:
 
-```toml
-schema_version = 1
-agent_id = "frontend_agent"
-module = "frontend_agent"
-
-container_capabilities = [
-  "network",
-]
-
-application_capabilities = [
-  "a2a",
-  "openai_agents",
-]
-
-[squid_proxy]
-allowed_domains = []
-allowed_ip_addresses = []
-
-[mcp_sidecar]
-tools = []
-resources = []
+```text
+/sandbox-shared/
+  solution.py          # implementation; only coder_agent should edit this
+  tests.py             # generated/owned by tester_agent
+  test-results.json    # generated/owned by tester_agent
+  red-green-state.json # optional coordinator state for future phases
 ```
 
-The manager spec at `src/sandbox_agent/sandbox_spec.toml` declares `network`,
-`a2a`, and `openai_agents`. It does not expose MCP tools in the default
-BugReportTeam workflow.
-
-Unknown keys, unknown capability values, duplicate IDs, invalid ports, and
-invalid execution orders fail closed during parsing/planning.
+The final implementation target is a single, self-contained `solution.py`.
+`tests.py` and metadata files are coordination artifacts, not part of the final
+implementation.
 
 ## Architecture
 
-![BugReportTeam Docker network architecture](ARCHITECTURE.png)
+The high-level runtime shape is shown in `ARCHITECTURE.png`. At a glance:
 
-The project has nine main packages:
+- The host starts `sandbox_agent`, which delegates the actual run to
+  `docker_sandbox`.
+- `docker_sandbox` creates a disposable Docker network and starts the three
+  RedGreenTeam agents plus the required sidecars.
+- The agents coordinate through A2A HTTP calls and the shared
+  `/sandbox-shared` volume.
+- The tester runs the combined `solution.py` and `tests.py` through the
+  no-network code-execution sidecar.
+- The MCP sidecar exposes filesystem tools within the mounted sandbox paths.
+
+## Main Packages
 
 - `a2a_support`: shared client and server helpers for the project's small A2A
-  HTTP integrations, including Agent Card construction, JSON-RPC text messages,
-  task polling, task artifacts, and parallel task collection.
-- `sandbox_agent`: the entry manager workload. It owns the OpenAI Agents SDK
-  prompt, parallel specialist A2A calls, final classification, and answer file.
-- `frontend_agent`: supporting OpenAI Agents SDK task worker for frontend/UI
-  likelihood assessment.
-- `backend_agent`: supporting OpenAI Agents SDK task worker for web server
-  backend likelihood assessment.
-- `database_agent`: supporting OpenAI Agents SDK task worker for database and
-  data-layer likelihood assessment.
-- `mcp_sidecar`: optional MCP server container workload. It owns local MCP
-  resources, local MCP tools, OpenAI image generation, MariaDB access, Microsoft
-  Learn proxy tools, Jina Reader client logic, code-execution client logic, and
-  audit logging.
+  HTTP integrations.
+- `sandbox_agent`: the entry coordinator workload and OpenAI Agents SDK prompt.
+- `tester_agent`: the testing/critic worker that writes and runs tests.
+- `coder_agent`: the implementation worker that updates `solution.py`.
+- `mcp_sidecar`: optional MCP server container workload exposing declared tools
+  and resources.
 - `code_sidecar`: optional no-network code-execution sidecar.
-- `docker_sandbox`: the host/container harness. It owns TOML parsing, planning,
-  per-agent image creation, Docker networking, sidecar startup, entry-agent
-  execution, artifacts, and teardown.
+- `docker_sandbox`: the host/container harness for TOML parsing, planning,
+  image creation, networking, sidecar startup, artifact collection, and teardown.
 - `sandbox_tester`: the copied probe suite used by `--test-sandbox`.
-
-The default Docker topology is:
-
-```text
-Docker host
-  docker_sandbox host runner
-    |
-    +-- Docker internal sandbox network
-          |
-          +-- sandbox-agent-*-frontend_agent container
-          |     network alias: frontend-agent
-          |     A2A task server on port 8080
-          |
-          +-- sandbox-agent-*-backend_agent container
-          |     network alias: backend-agent
-          |     A2A task server on port 8080
-          |
-          +-- sandbox-agent-*-database_agent container
-          |     network alias: database-agent
-          |     A2A task server on port 8080
-          |
-          +-- sandbox-agent-*-agent_1 container
-          |     entry manager
-          |     starts all three worker tasks and polls them together
-          |
-          +-- squid proxy container
-                network alias: egress-gateway
-```
 
 ## Runtime Environment
 
@@ -263,13 +211,15 @@ To serialize probe evidence for troubleshooting:
 
 ## Notes
 
-BugReportTeam is a learning and hardening exercise, not a security proof. The
+RedGreenTeam is a learning and hardening exercise, not a security proof. The
 container policy reduces accidental host exposure and makes required capability
 softening visible, but Docker, Landlock, seccomp, Squid, MCP tool boundaries,
 sidecar behavior, and Python runtime guards should not be interpreted as a
 complete isolation guarantee.
 
-Generated assessments can vary between runs because they are model-generated.
+Generated behavior can vary between runs because the coordinator, tester, and
+coder are model-driven. The sandbox harness and shared artifact contract are
+kept intentionally simple so that the critic loop remains easy to inspect.
 
 Run artifacts under `.docker_sandbox/runs` are ignored by Git.
 

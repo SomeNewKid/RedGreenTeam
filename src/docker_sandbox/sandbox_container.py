@@ -180,6 +180,18 @@ class _InteractiveProcessResult:
     stderr: str
 
 
+class _McpSidecarStartError(RuntimeError):
+    def __init__(self, message: str, commands: list[list[str]]) -> None:
+        super().__init__(message)
+        self.commands = commands
+
+
+class _GatewayStartError(RuntimeError):
+    def __init__(self, message: str, commands: list[list[str]]) -> None:
+        super().__init__(message)
+        self.commands = commands
+
+
 def run_sandbox_container(
     configuration: DockerConfiguration,
     verbose: bool = False,
@@ -246,12 +258,57 @@ def run_sandbox_container(
     environment_variables = _resolve_environment_variables(
         configured_environment_variables,
     )
-    gateway_commands, gateway_ip_address = _start_network_gateway(
-        configuration,
-        run_directory,
-        network_name,
-        gateway_container_name,
-    )
+    try:
+        gateway_commands, gateway_ip_address = _start_network_gateway(
+            configuration,
+            run_directory,
+            network_name,
+            gateway_container_name,
+        )
+    except _GatewayStartError as error:
+        _write_gateway_logs(configuration, run_directory, gateway_container_name)
+        _delete_readonly_denied_directory(configuration, run_directory)
+        _delete_readonly_persistence_directory(configuration, run_directory)
+        _delete_denied_executable_directory(configuration, run_directory)
+        gateway_cleanup_commands = _build_gateway_cleanup_commands(
+            configuration,
+            network_name,
+            gateway_container_name,
+        )
+        command = error.commands[-1] if error.commands else []
+        remove_command = [_DOCKER_EXECUTABLE, "rm", "--force", container_name]
+        return DockerRunResult(
+            image_name=configuration.profile.image_name,
+            profile_name=configuration.profile.name,
+            container_name=container_name,
+            run_directory=run_directory,
+            command=command,
+            remove_command=remove_command,
+            exit_code=1,
+            stdout="",
+            stderr=str(error),
+            agent_results=(),
+            network_name=network_name,
+            gateway_container_name=gateway_container_name,
+            gateway_ip_address=None,
+            gateway_commands=error.commands,
+            gateway_cleanup_commands=gateway_cleanup_commands,
+            mcp_sidecar_container_name=mcp_sidecar_container_name,
+            mcp_sidecar_commands=None,
+            mcp_sidecar_cleanup_commands=None,
+            jina_reader_container_name=jina_reader_container_name,
+            jina_reader_commands=None,
+            jina_reader_cleanup_commands=None,
+            code_sidecar_container_name=code_sidecar_container_name,
+            code_sidecar_commands=None,
+            code_sidecar_cleanup_commands=None,
+            haproxy_sidecar_container_name=haproxy_sidecar_container_name,
+            haproxy_sidecar_commands=None,
+            haproxy_sidecar_cleanup_commands=None,
+            ollama_sidecar_container_name=ollama_sidecar_container_name,
+            ollama_sidecar_commands=None,
+            ollama_sidecar_cleanup_commands=None,
+        )
     jina_reader_commands = _start_jina_reader(
         configuration,
         run_directory,
@@ -288,12 +345,96 @@ def run_sandbox_container(
         network_name,
         ollama_sidecar_container_name,
     )
-    mcp_sidecar_commands = _start_mcp_sidecar(
-        configuration,
-        run_directory,
-        network_name,
-        mcp_sidecar_container_name,
-    )
+    try:
+        mcp_sidecar_commands = _start_mcp_sidecar(
+            configuration,
+            run_directory,
+            network_name,
+            mcp_sidecar_container_name,
+        )
+    except _McpSidecarStartError as error:
+        _write_mcp_sidecar_logs(
+            configuration, run_directory, mcp_sidecar_container_name
+        )
+        _write_jina_reader_logs(
+            configuration, run_directory, jina_reader_container_name
+        )
+        _write_code_sidecar_logs(
+            configuration, run_directory, code_sidecar_container_name
+        )
+        _write_haproxy_sidecar_logs(
+            configuration,
+            run_directory,
+            haproxy_sidecar_container_name,
+        )
+        _write_ollama_sidecar_logs(
+            configuration,
+            run_directory,
+            ollama_sidecar_container_name,
+        )
+        _write_gateway_logs(configuration, run_directory, gateway_container_name)
+        _delete_readonly_denied_directory(configuration, run_directory)
+        _delete_readonly_persistence_directory(configuration, run_directory)
+        _delete_denied_executable_directory(configuration, run_directory)
+        gateway_cleanup_commands = _build_gateway_cleanup_commands(
+            configuration,
+            network_name,
+            gateway_container_name,
+        )
+        mcp_sidecar_cleanup_commands = _build_mcp_sidecar_cleanup_commands(
+            configuration,
+            mcp_sidecar_container_name,
+        )
+        jina_reader_cleanup_commands = _build_jina_reader_cleanup_commands(
+            configuration,
+            jina_reader_container_name,
+        )
+        code_sidecar_cleanup_commands = _build_code_sidecar_cleanup_commands(
+            configuration,
+            code_sidecar_container_name,
+        )
+        haproxy_sidecar_cleanup_commands = _build_haproxy_sidecar_cleanup_commands(
+            configuration,
+            haproxy_sidecar_container_name,
+        )
+        ollama_sidecar_cleanup_commands = _build_ollama_sidecar_cleanup_commands(
+            configuration,
+            ollama_sidecar_container_name,
+        )
+        command = error.commands[-1] if error.commands else []
+        remove_command = [_DOCKER_EXECUTABLE, "rm", "--force", container_name]
+        return DockerRunResult(
+            image_name=configuration.profile.image_name,
+            profile_name=configuration.profile.name,
+            container_name=container_name,
+            run_directory=run_directory,
+            command=command,
+            remove_command=remove_command,
+            exit_code=1,
+            stdout="",
+            stderr=str(error),
+            agent_results=(),
+            network_name=network_name,
+            gateway_container_name=gateway_container_name,
+            gateway_ip_address=gateway_ip_address,
+            gateway_commands=gateway_commands,
+            gateway_cleanup_commands=gateway_cleanup_commands,
+            mcp_sidecar_container_name=mcp_sidecar_container_name,
+            mcp_sidecar_commands=error.commands,
+            mcp_sidecar_cleanup_commands=mcp_sidecar_cleanup_commands,
+            jina_reader_container_name=jina_reader_container_name,
+            jina_reader_commands=jina_reader_commands,
+            jina_reader_cleanup_commands=jina_reader_cleanup_commands,
+            code_sidecar_container_name=code_sidecar_container_name,
+            code_sidecar_commands=code_sidecar_commands,
+            code_sidecar_cleanup_commands=code_sidecar_cleanup_commands,
+            haproxy_sidecar_container_name=haproxy_sidecar_container_name,
+            haproxy_sidecar_commands=haproxy_sidecar_commands,
+            haproxy_sidecar_cleanup_commands=haproxy_sidecar_cleanup_commands,
+            ollama_sidecar_container_name=ollama_sidecar_container_name,
+            ollama_sidecar_commands=ollama_sidecar_commands,
+            ollama_sidecar_cleanup_commands=ollama_sidecar_cleanup_commands,
+        )
     completed, agent_results = _run_agent_containers(
         configuration=configuration,
         run_directory=run_directory,
@@ -1327,6 +1468,7 @@ def _start_network_gateway(
         configuration,
     )
     results = []
+    executed_commands = []
     for command in commands:
         completed = subprocess.run(
             command,
@@ -1334,7 +1476,12 @@ def _start_network_gateway(
             capture_output=True,
             text=True,
         )
+        executed_commands.append(command)
         results.append(_build_gateway_command_result(command, completed))
+        if completed.returncode != 0:
+            _write_gateway_start_results(run_directory, results)
+            message = _build_gateway_start_failure_message(command, completed)
+            raise _GatewayStartError(message, executed_commands)
 
     gateway_ip_address = _inspect_gateway_ip_address(
         gateway_container_name, network_name
@@ -1351,6 +1498,16 @@ def _start_network_gateway(
     _write_gateway_start_results(run_directory, results)
 
     return commands, gateway_ip_address
+
+
+def _build_gateway_start_failure_message(
+    command: list[str],
+    completed: subprocess.CompletedProcess[str],
+) -> str:
+    command_text = " ".join(str(part) for part in command)
+    stderr = completed.stderr.strip()
+    detail = f": {stderr}" if stderr else ""
+    return f"Network gateway startup failed for `{command_text}`{detail}"
 
 
 def _build_gateway_command_result(
@@ -1474,7 +1631,34 @@ def _start_mcp_sidecar(
     results.append(run_result)
 
     _write_mcp_sidecar_start_results(run_directory, results)
+    _raise_for_mcp_sidecar_start_failure(results)
     return commands
+
+
+def _raise_for_mcp_sidecar_start_failure(
+    results: list[dict[str, object]],
+) -> None:
+    failed_results = [
+        result
+        for result in results
+        if isinstance(result.get("returncode"), int) and result["returncode"] != 0
+    ]
+    if not failed_results:
+        return
+
+    failed_result = failed_results[-1]
+    command_object = failed_result.get("command", [])
+    command = command_object if isinstance(command_object, list) else []
+    command_text = " ".join(str(part) for part in command)
+    stderr = str(failed_result.get("stderr", "")).strip()
+    detail = f": {stderr}" if stderr else ""
+    commands: list[list[str]] = []
+    for result in results:
+        result_command = result.get("command")
+        if isinstance(result_command, list):
+            commands.append([str(part) for part in result_command])
+    message = f"MCP sidecar startup failed for `{command_text}`{detail}"
+    raise _McpSidecarStartError(message, commands)
 
 
 def _run_recorded_docker_command(command: list[str]) -> dict[str, object]:
@@ -2217,7 +2401,7 @@ def _build_code_sidecar_run_command(
 ) -> list[str]:
     source_mount = _build_code_sidecar_source_mount(configuration)
     output_mount = _build_code_sidecar_output_mount(run_directory)
-    return [
+    command = [
         _DOCKER_EXECUTABLE,
         "run",
         "--detach",
@@ -2229,37 +2413,46 @@ def _build_code_sidecar_run_command(
         network_name,
         "--network-alias",
         _CODE_SIDECAR_ALIAS,
-        "--pids-limit",
-        "32",
-        "--memory",
-        "128m",
-        "--memory-swap",
-        "128m",
-        "--cpus",
-        "0.5",
-        "--cap-drop=ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--security-opt",
-        f"seccomp={run_directory / _SECCOMP_PROFILE_FILE_NAME}",
-        "--tmpfs",
-        "/tmp:rw,nosuid,nodev,noexec,size=16m",
-        "--env",
-        f"{_CODE_SIDECAR_OUTPUT_DIRECTORY_ENVIRONMENT_VARIABLE}="
-        f"{_CODE_SIDECAR_OUTPUT_DIRECTORY}",
-        "--mount",
-        source_mount,
-        "--mount",
-        output_mount,
-        _CODE_SIDECAR_IMAGE_NAME,
-        "python",
-        "-m",
-        "code_sidecar",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(_CODE_SIDECAR_PORT),
     ]
+    plan = configuration.resolved_sandbox_plan
+    if plan is not None and plan.code_sidecar.ip_address is not None:
+        command.extend(["--ip", plan.code_sidecar.ip_address])
+
+    command.extend(
+        [
+            "--pids-limit",
+            "32",
+            "--memory",
+            "128m",
+            "--memory-swap",
+            "128m",
+            "--cpus",
+            "0.5",
+            "--cap-drop=ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--security-opt",
+            f"seccomp={run_directory / _SECCOMP_PROFILE_FILE_NAME}",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=16m",
+            "--env",
+            f"{_CODE_SIDECAR_OUTPUT_DIRECTORY_ENVIRONMENT_VARIABLE}="
+            f"{_CODE_SIDECAR_OUTPUT_DIRECTORY}",
+            "--mount",
+            source_mount,
+            "--mount",
+            output_mount,
+            _CODE_SIDECAR_IMAGE_NAME,
+            "python",
+            "-m",
+            "code_sidecar",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(_CODE_SIDECAR_PORT),
+        ]
+    )
+    return command
 
 
 def _build_code_sidecar_source_mount(configuration: DockerConfiguration) -> str:

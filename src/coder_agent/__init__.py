@@ -1,0 +1,1 @@
+"""RedGreenTeam coder agent package."""

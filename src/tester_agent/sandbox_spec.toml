@@ -1,13 +1,16 @@
 schema_version = 1
-agent_id = "frontend_agent"
-module = "frontend_agent"
+agent_id = "tester_agent"
+module = "tester_agent"
 
 container_capabilities = [
   "network",
+  "shared_volume",
 ]
 
 application_capabilities = [
   "a2a",
+  "code_execution",
+  "mcp_client",
   "openai_agents",
 ]
 
@@ -16,5 +19,7 @@ allowed_domains = []
 allowed_ip_addresses = []
 
 [mcp_sidecar]
-tools = []
+tools = [
+  "run_python_script",
+]
 resources = []

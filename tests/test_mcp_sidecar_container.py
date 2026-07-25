@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from docker_sandbox.models import (
     AgentImageConfiguration,
     DockerConfiguration,
@@ -46,6 +48,7 @@ from docker_sandbox.sandbox_container import (
     _start_haproxy_sidecar,
     _start_jina_reader,
     _start_mcp_sidecar,
+    _start_network_gateway,
     _start_ollama_sidecar,
     _wait_for_jina_reader_ready,
     _wait_for_ollama_sidecar_ready,
@@ -58,7 +61,14 @@ from docker_sandbox.sandbox_container import (
     _write_ollama_sidecar_dockerfile,
     _write_ollama_sidecar_logs,
 )
-from docker_sandbox.sandbox_plan import ResolvedAgentPlan
+from docker_sandbox.sandbox_plan import (
+    ResolvedAgentPlan,
+    ResolvedCodeSidecarPlan,
+    ResolvedHAProxyPlan,
+    ResolvedMcpSidecarPlan,
+    ResolvedSandboxPlan,
+    ResolvedSquidPlan,
+)
 from docker_sandbox.sandbox_spec import resolve_ollama_image_name
 
 
@@ -337,8 +347,26 @@ def test_jina_reader_run_command_uses_internal_network_and_proxy() -> None:
 
 def test_code_sidecar_run_command_uses_internal_network_without_proxy() -> None:
     """Verify the code sidecar starts with tight local-only hardening."""
+    configuration = _create_code_execution_configuration()
+    configuration = replace(
+        configuration,
+        resolved_sandbox_plan=ResolvedSandboxPlan(
+            run_id="run-1",
+            network_name="sandbox-agent-net-1",
+            subnet="172.28.0.0/24",
+            agents=(),
+            squid_proxy=ResolvedSquidPlan(enabled=True),
+            haproxy=ResolvedHAProxyPlan(enabled=False),
+            mcp_sidecar=ResolvedMcpSidecarPlan(enabled=False),
+            code_sidecar=ResolvedCodeSidecarPlan(
+                enabled=True,
+                container_name="code-sidecar-1",
+                ip_address="172.28.0.4",
+            ),
+        ),
+    )
     command = _build_code_sidecar_run_command(
-        _create_code_execution_configuration(),
+        configuration,
         Path(".docker_sandbox") / "runs" / "run-1",
         "sandbox-agent-net-1",
         "code-sidecar-1",
@@ -348,6 +376,7 @@ def test_code_sidecar_run_command_uses_internal_network_without_proxy() -> None:
     assert "code-sidecar-1" in command
     assert _option_value(command, "--network") == "sandbox-agent-net-1"
     assert _option_value(command, "--network-alias") == "code-sidecar"
+    assert _option_value(command, "--ip") == "172.28.0.4"
     assert _option_value(command, "--pids-limit") == "32"
     assert _option_value(command, "--memory") == "128m"
     assert _option_value(command, "--memory-swap") == "128m"
@@ -486,6 +515,51 @@ def test_mcp_sidecar_run_command_copies_openai_api_key_for_openai() -> None:
     assert "OPENAI_API_KEY" in _option_values(command, "--env")
 
 
+def test_start_network_gateway_raises_when_network_create_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify gateway startup fails fast when Docker cannot create the network."""
+    configuration = _create_network_configuration()
+    calls = []
+
+    def fake_run(
+        command: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        _ = check
+        _ = capture_output
+        _ = text
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Error response from daemon: invalid pool request: "
+                "Pool overlaps with other one on this address space\n"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Network gateway startup failed"):
+        _start_network_gateway(
+            configuration,
+            tmp_path,
+            "sandbox-agent-net-1",
+            "squid-proxy-1",
+        )
+
+    start_results = json.loads((tmp_path / "gateway-start-results.json").read_text())
+    assert len(calls) == 1
+    assert calls[0][:3] == ["docker", "network", "create"]
+    assert start_results[0]["returncode"] == 1
+    assert "Pool overlaps" in start_results[0]["stderr"]
+
+
 def test_start_mcp_sidecar_rebuilds_image_before_running(
     tmp_path: Path,
     monkeypatch,
@@ -541,6 +615,55 @@ def test_start_mcp_sidecar_rebuilds_image_before_running(
     assert commands == expected_commands
     assert calls == expected_commands
     assert [result["command"] for result in start_results] == expected_commands
+
+
+def test_start_mcp_sidecar_raises_when_run_command_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify MCP startup fails fast when Docker cannot run the sidecar."""
+    configuration = _create_network_configuration()
+    calls = []
+
+    def fake_run(
+        command: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        _ = check
+        _ = capture_output
+        _ = text
+        _ = encoding
+        _ = errors
+        calls.append(command)
+        returncode = 125 if "run" in command else 0
+        stderr = "docker: Error response from daemon: Address already in use.\n"
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=returncode,
+            stdout="",
+            stderr=stderr if returncode else "",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="MCP sidecar startup failed"):
+        _start_mcp_sidecar(
+            configuration,
+            tmp_path,
+            "sandbox-agent-net-1",
+            "mcp-sidecar-1",
+        )
+
+    start_results = json.loads(
+        (tmp_path / "mcp-sidecar-start-results.json").read_text()
+    )
+    assert calls[-1][1] == "run"
+    assert start_results[-1]["returncode"] == 125
+    assert "Address already in use" in start_results[-1]["stderr"]
 
 
 def test_code_sidecar_image_commands_use_static_dockerfile() -> None:
@@ -889,21 +1012,21 @@ def test_agent_docker_run_command_mounts_declared_shared_volume(
     configuration = _create_network_configuration()
     run_directory = tmp_path / "run-1"
     agent_plan = ResolvedAgentPlan(
-        agent_id="frontend_agent",
-        module="frontend_agent",
-        image_name="sandbox-agent/sandbox-agent:frontend",
-        container_name="sandbox-agent-run-1-frontend-agent",
+        agent_id="tester_agent",
+        module="tester_agent",
+        image_name="sandbox-agent/sandbox-agent:tester",
+        container_name="sandbox-agent-run-1-tester-agent",
         ip_address="172.28.0.12",
     )
     agent_profile = replace(
         configuration.profile,
-        image_name="sandbox-agent/sandbox-agent:frontend",
+        image_name="sandbox-agent/sandbox-agent:tester",
     )
     configuration = replace(
         configuration,
         agent_image_configurations=(
             AgentImageConfiguration(
-                agent_id="frontend_agent",
+                agent_id="tester_agent",
                 dockerfile_path=tmp_path / "Dockerfile",
                 profile=agent_profile,
                 generated_dockerfile="FROM python:3.12-slim",
@@ -919,7 +1042,7 @@ def test_agent_docker_run_command_mounts_declared_shared_volume(
         configuration=configuration,
         run_directory=run_directory,
         container_name=agent_plan.container_name,
-        remote_run_directory="/tmp/sandbox-tester/run-1/agents/frontend_agent",
+        remote_run_directory="/tmp/sandbox-tester/run-1/agents/tester_agent",
         network_name="sandbox-agent-net-1",
         agent_plan=agent_plan,
     )

@@ -55,6 +55,7 @@ _SUPPORTED_APPLICATION_CAPABILITIES = {
     "a2a",
     "anthropic_claude",
     "anthropic_python",
+    "code_execution",
     "crewai",
     "google_adk",
     "ibm_beeai",
@@ -102,6 +103,7 @@ _NETWORK_NAME_PREFIX = "sandbox-agent-net"
 _SQUID_CONTAINER_NAME_PREFIX = "squid-proxy"
 _HAPROXY_CONTAINER_NAME_PREFIX = "haproxy-sidecar"
 _MCP_SIDECAR_CONTAINER_NAME_PREFIX = "mcp-sidecar"
+_CODE_SIDECAR_CONTAINER_NAME_PREFIX = "code-sidecar"
 _SQUID_ALIAS = "egress-gateway"
 _SQUID_PORT = 3128
 _HAPROXY_ALIAS = "haproxy-sidecar"
@@ -114,7 +116,8 @@ _DEFAULT_SUBNET = "172.28.0.0/24"
 _SERVICE_IP_OFFSETS = {
     "squid": 2,
     "mcp": 3,
-    "haproxy": 4,
+    "code": 4,
+    "haproxy": 5,
 }
 _AGENT_IP_START_OFFSET = 11
 _HASH_LENGTH = 16
@@ -332,6 +335,15 @@ class ResolvedMcpSidecarPlan:
 
 
 @dataclass(frozen=True)
+class ResolvedCodeSidecarPlan:
+    """Resolved shared code-execution sidecar network plan for a run."""
+
+    enabled: bool
+    container_name: str | None = None
+    ip_address: str | None = None
+
+
+@dataclass(frozen=True)
 class ResolvedSandboxPlan:
     """Resolved runtime plan consumed by Docker orchestration."""
 
@@ -342,6 +354,7 @@ class ResolvedSandboxPlan:
     squid_proxy: ResolvedSquidPlan
     haproxy: ResolvedHAProxyPlan
     mcp_sidecar: ResolvedMcpSidecarPlan
+    code_sidecar: ResolvedCodeSidecarPlan = ResolvedCodeSidecarPlan(enabled=False)
     execution: ExecutionSpec = ExecutionSpec()
     network_internal: bool = True
 
@@ -394,12 +407,19 @@ def build_sandbox_plan(
 
     squid_ip_address = _allocate_service_ip(ip_allocator, "squid")
     mcp_ip_address = _allocate_service_ip(ip_allocator, "mcp")
+    code_ip_address = _allocate_service_ip(ip_allocator, "code")
     haproxy_ip_address = _allocate_service_ip(ip_allocator, "haproxy")
     mcp_sidecar = build_mcp_sidecar_plan(
         run_spec.mcp_sidecar,
         ordered_agent_specs,
         container_name=_container_name(_MCP_SIDECAR_CONTAINER_NAME_PREFIX, run_id),
         ip_address=mcp_ip_address,
+    )
+    code_sidecar = _build_code_sidecar_plan(
+        run_spec,
+        ordered_agent_specs,
+        run_id,
+        code_ip_address,
     )
     haproxy = _build_haproxy_plan(
         run_spec,
@@ -435,6 +455,7 @@ def build_sandbox_plan(
         squid_proxy=squid_proxy,
         haproxy=haproxy,
         mcp_sidecar=mcp_sidecar,
+        code_sidecar=code_sidecar,
         execution=execution,
         network_internal=run_spec.network.internal,
     )
@@ -892,6 +913,24 @@ def _build_haproxy_plan(
         else None,
         ip_address=ip_address if enabled else None,
         default_ports=run_spec.haproxy.default_ports,
+    )
+
+
+def _build_code_sidecar_plan(
+    run_spec: SandboxRunSpec,
+    agent_specs: tuple[AgentSpec, ...],
+    run_id: str,
+    ip_address: str | None,
+) -> ResolvedCodeSidecarPlan:
+    enabled = run_spec.network.enabled and any(
+        "code_execution" in agent.application_capabilities for agent in agent_specs
+    )
+    return ResolvedCodeSidecarPlan(
+        enabled=enabled,
+        container_name=_container_name(_CODE_SIDECAR_CONTAINER_NAME_PREFIX, run_id)
+        if enabled
+        else None,
+        ip_address=ip_address if enabled else None,
     )
 
 
@@ -1493,6 +1532,7 @@ def _validate_agent_network_requirements(
         "a2a",
         "anthropic_claude",
         "anthropic_python",
+        "code_execution",
         "crewai",
         "google_adk",
         "ibm_beeai",
